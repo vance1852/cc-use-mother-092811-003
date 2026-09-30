@@ -8,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .charging_service import ChargingService
 from .errors import DomainError, ValidationError
 from .service import DomainService
 from .storage import Database
@@ -21,6 +22,7 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
     body = body or {}
     parsed = urlparse(path)
     actor_id = headers.get("X-Actor-Id", "")
+    charging_service = ChargingService(service.database, service.clock)
     try:
         if method == "GET" and parsed.path == "/health":
             valid, count = service.verify_audit()
@@ -48,11 +50,58 @@ def route(service: DomainService, method: str, path: str, body: dict[str, Any] |
             query = parse_qs(parsed.query)
             after = int(query.get("after_sequence", ["0"])[0])
             return 200, {"items": service.audit_events(after)}
+        result = _charging_route(charging_service, method, parsed, body, actor_id)
+        if result is not None:
+            return result
         return 404, {"error": "route_not_found", "message": "接口不存在"}
     except DomainError as exc:
         return exc.status, {"error": exc.code, "message": str(exc)}
     except (TypeError, ValueError) as exc:
         return 400, {"error": "invalid_request", "message": str(exc)}
+
+
+CHARGING_POST_ROUTES = {
+    "/vehicles": "register_vehicle",
+    "/corridors": "register_corridor",
+    "/stations": "register_station",
+    "/station-state": "set_station_active",
+    "/chargers": "register_charger",
+    "/station-outages": "add_station_outage",
+    "/charger-outages": "add_charger_outage",
+    "/power-windows": "add_power_window",
+    "/road-versions": "publish_road_version",
+    "/trips": "create_trip",
+    "/energy-plans": "plan_energy",
+    "/plan-confirmations": "confirm_plan",
+    "/arrivals": "mark_arrival",
+    "/session-starts": "start_session",
+    "/session-completions": "complete_session",
+    "/trip-events": "report_event",
+}
+
+
+def _charging_route(charging_service: ChargingService, method: str, parsed,
+                    body: dict[str, Any], actor_id: str):
+    if method == "POST" and parsed.path in CHARGING_POST_ROUTES:
+        fn = getattr(charging_service, CHARGING_POST_ROUTES[parsed.path])
+        result = fn(actor_id=actor_id, **body)
+        return (200 if result.get("replayed") else 201), result
+    if method == "GET":
+        parts = [segment for segment in parsed.path.split("/") if segment]
+        query = parse_qs(parsed.query)
+        if len(parts) == 3 and parts[0] == "trips" and parts[2] == "safety":
+            return 200, charging_service.trip_safety(parts[1])
+        if len(parts) == 3 and parts[0] == "trips" and parts[2] == "timeline":
+            return 200, charging_service.trip_timeline(parts[1])
+        if len(parts) == 1 and parts[0] == "safety-board":
+            return 200, charging_service.safety_board(query.get("corridor_id", [None])[0])
+        if len(parts) == 3 and parts[0] == "stations" and parts[2] == "power":
+            at = query.get("at", [None])[0]
+            slots = int(query.get("slots", ["8"])[0])
+            return 200, charging_service.station_power(parts[1], at=at, slots=slots)
+        if len(parts) == 2 and parts[0] == "plans":
+            return 200, charging_service.get_plan(parts[1])
+    return None
 
 
 class Handler(BaseHTTPRequestHandler):
