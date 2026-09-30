@@ -33,3 +33,24 @@ class ConflictError(DomainError):
 
     code = "conflict"
     status = 409
+
+
+class PlanningError(DomainError):
+    """补能计划无法生成或当前状态不允许该动作。"""
+
+    code = "planning_error"
+    status = 422
+
+
+class CapacityError(DomainError):
+    """站点时隙容量不足，无法锁定。"""
+
+    code = "capacity_exceeded"
+    status = 409
+
+
+class StaleVersionError(DomainError):
+    """道路版本、计划有效期或设备状态已变化。"""
+
+    code = "stale_version"
+    status = 409
